@@ -6,6 +6,7 @@
 */
 
 import { HttpsProxyAgent } from "https-proxy-agent";
+console.log(" HTTPS_PROXY at runtime:", process.env.HTTPS_PROXY);
 
 const PROXY_URL = process.env.HTTPS_PROXY || "";
 const fetchOpts = PROXY_URL ? { agent: new HttpsProxyAgent(PROXY_URL) } : {};
