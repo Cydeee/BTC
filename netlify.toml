@@ -1,25 +1,23 @@
-# ────────────────────────────────────────────────
-# Netlify config – no site build, only Edge Fns
-# ────────────────────────────────────────────────
 [build]
-  # No “npm install”, no “npm run build”
   command = "echo 'skip site build'"
-  publish = "."                 # nothing to deploy except edge fns
+  publish = "."
 
 [functions]
-  node_bundler = "esbuild"      # default, keeps edge bundle small
+  node_bundler = "esbuild"
 
 [[edge_functions]]
-  function = "data"             # handles /data and /data.json
+  function = "data"
   path     = "/data"
   cache    = "manual"
+  external_node_modules = ["https-proxy-agent"]   # ← NEW
 
 [[edge_functions]]
   function = "data"
   path     = "/data.json"
   cache    = "manual"
+  external_node_modules = ["https-proxy-agent"]   # ← NEW
 
 [[edge_functions]]
-  function = "data-page"        # pretty HTML view
+  function = "data-page"
   path     = "/data.html"
   cache    = "manual"
