@@ -7,8 +7,9 @@ jobs:
   bootstrap-and-deploy:
     runs-on: ubuntu-latest
     env:
-      # Hard‑coded org‑scoped Fly token
-      FLY_ORG_TOKEN: FlyV1 fm2_lJPECAAAAAAACYwhxBCaosxGd4RXeMIy27qwjjS5wrVodHRwczovL2FwaS5mbHkuaW8vdjGUAJLOABJaHx8Lk7lodHRwczovL2FwaS5mbHkuaW8vYWFhL3YxxDzCml+IhhqhitGsnZpIPk2kqga4e+aEe7DxG3Hf2JzxtPNRGx0/xhQcZtIwTHdzyHHDi4CQfHnUXRxG447ETvXvkzdba3Lxs+fWODgpBgQWOmT4h8wbOPNLoOWCgEx9FzjT2F6hL4SBeQxIRrmMC94bjLFduDRG0GX14ZlkXkY99PRqnG3tVxvsw7WP4cQgfLOUY7+n9h932dWeBHz0JE93nhlV3nIOMX3JTE3QMM8=,fm2_lJPETvXvkzdba3Lxs+fWODgpBgQWOmT4h8wbOPNLoOWCgEx9FzjT2F6hL4SBeQxIRrmMC94bjLFduDRG0GX14ZlkXkY99PRqnG3tVxvsw7WP4cQQX2sm5vFX4Vq0nMRaaKyLaMO5aHR0cHM6Ly9hcGkuZmx5LmlvL2FhYS92MZgEks5ohYBbzwAAAAEkfZ55F84AEaOYCpHOABGjmAzEELg5DVLKiBw0EdnSWh0Ye9nEIJHKvZ4+cwSnZtaklcVsAgliGow/b9ZCWqIh31/sN1Ly
+      # ─── Properly quoted org‑scoped Fly token ───
+      FLY_ORG_TOKEN: |
+        FlyV1 fm2_lJPECAAAAAAACYwhxBCaosxGd4RXeMIy27qwjjS5wrVodHRwczovL2FwaS5mbHkuaW8vdjGUAJLOABJaHx8Lk7lodHRwczovL2FwaS5mbHkuaW8vYWFhL3YxxDzCml+IhhqhitGsnZpIPk2kqga4e+aEe7DxG3Hf2JzxtPNRGx0/xhQcZtIwTHdzyHHDi4CQfHnUXRxG447ETvXvkzdba3Lxs+fWODgpBgQWOmT4h8wbOPNLoOWCgEx9FzjT2F6hL4SBeQxIRrmMC94bjLFduDRG0GX14ZlkXkY99PRqnG3tVxvsw7WP4cQgfLOUY7+n9h932dWeBHz0JE93nhlV3nIOMX3JTE3QMM8=,fm2_lJPETvXvkzdba3Lxs+fWODgpBgQWOmT4h8wbOPNLoOWCgEx9FzjT2F6hL4SBeQxIRrmMC94bjLFduDRG0GX14ZlkXkY99PRqnG3tVxvsw7WP4cQQX2sm5vFX4Vq0nMRaaKyLaMO5aHR0cHM6Ly9hcGkuZmx5LmlvL2FhYS92MZgEks5ohYBbzwAAAAEkfZ55F84AEaOYCpHOABGjmAzEELg5DVLKiBw0EdnSWh0Ye9nEIJHKvZ4+cwSnZtaklcVsAgliGow/b9ZCWqIh31/sN1Ly
       APP_NAME: binance-proxy
       REGION: fra
       PROXY_DIR: fly-proxy
@@ -23,10 +24,11 @@ jobs:
       - name: Fetch organization_id
         id: org
         run: |
-          ORG_ID=$(curl -s \
+          # Wrap the pipeline in quotes so bash expands correctly
+          ORG_ID="$(curl -s \
             -H "Authorization: Bearer $FLY_ORG_TOKEN" \
             "https://api.fly.io/api/v1/orgs" \
-            | jq -r '.data[0].id')
+            | jq -r '.data[0].id')"
           if [ -z "$ORG_ID" ] || [ "$ORG_ID" = "null" ]; then
             echo "❌ Failed to fetch organization_id" >&2
             exit 1
@@ -53,12 +55,12 @@ jobs:
       - name: Generate App‑Scoped Deploy Token
         id: token
         run: |
-          OUT=$(curl -s \
+          OUT="$(curl -s \
             -X POST https://api.fly.io/api/v1/apps/$APP_NAME/deploy_tokens \
             -H "Authorization: Bearer $FLY_ORG_TOKEN" \
             -H "Content-Type: application/json" \
-            -d '{"name":"github-deploy","expiry":"720h"}')
-          TOKEN=$(echo "$OUT" | jq -r .token)
+            -d '{"name":"github-deploy","expiry":"720h"}')"
+          TOKEN="$(echo "$OUT" | jq -r .token)"
           if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
             echo "❌ Failed to create deploy token: $OUT" >&2
             exit 1
