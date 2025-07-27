@@ -1,21 +1,23 @@
+# ─────────────────────────────────────
+# Netlify config – Edge Functions only
+# ─────────────────────────────────────
 [build]
   command = "echo 'skip site build'"
   publish = "."
 
 [functions]
-  node_bundler = "esbuild"
+  node_bundler          = "esbuild"
+  external_node_modules = ["https-proxy-agent"]   # ← moved here
 
 [[edge_functions]]
   function = "data"
   path     = "/data"
   cache    = "manual"
-  external_node_modules = ["https-proxy-agent"]   # ← NEW
 
 [[edge_functions]]
   function = "data"
   path     = "/data.json"
   cache    = "manual"
-  external_node_modules = ["https-proxy-agent"]   # ← NEW
 
 [[edge_functions]]
   function = "data-page"
