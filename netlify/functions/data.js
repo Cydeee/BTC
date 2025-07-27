@@ -1,26 +1,21 @@
 /*  Netlify Node 18 Function  –  data.js
-    Collects a BTC market “dashboard” and returns it as JSON.
-    All outbound requests use the forward proxy defined by the
-    HTTPS_PROXY environment variable, e.g.:
-      http://botuser:toto92@164.132.56.117:3128
+    Builds a BTC dashboard and returns JSON.
+    All outbound HTTP(S) requests respect the HTTPS_PROXY environment
+    variable (e.g. http://botuser:toto92@164.132.56.117:3128).
 */
 
 import { HttpsProxyAgent } from "https-proxy-agent";
-console.log(" HTTPS_PROXY at runtime:", process.env.HTTPS_PROXY);
 
 const PROXY_URL = process.env.HTTPS_PROXY || "";
-const fetchOpts = PROXY_URL ? { agent: new HttpsProxyAgent(PROXY_URL) } : {};
+const fetchOpts = PROXY_URL ? { dispatcher: new HttpsProxyAgent(PROXY_URL) } : {};
 
-// helper: fetch JSON through (optional) proxy
 async function safeJson(url) {
   const r = await fetch(url, fetchOpts);
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
 
-/* ─────────────────────────────────────────
-   Math helpers
-────────────────────────────────────────── */
+/* ───── math helpers ───── */
 const sma = (a, p) => a.slice(-p).reduce((s, v) => s + v, 0) / p;
 const ema = (a, p) => {
   if (a.length < p) return 0;
@@ -62,9 +57,7 @@ const atr = (h, l, c, p) => {
 const roc = (a, n) =>
   a.length >= n + 1 ? ((a.at(-1) - a.at(-(n + 1))) / a.at(-(n + 1))) * 100 : 0;
 
-/* ─────────────────────────────────────────
-   Build dashboard object
-────────────────────────────────────────── */
+/* ───── build dashboard ───── */
 async function buildDashboardData() {
   const SYMBOL = "BTCUSDT";
   const LIMIT = 250;
@@ -218,7 +211,12 @@ async function buildDashboardData() {
     out.dataE = {
       stressIndex: +stress.toFixed(2),
       highRisk: stress >= 5,
-      components: { biasScore: bScore, levScore: lScore, volScore: vScore, liqScore },
+      components: {
+        biasScore: bScore,
+        levScore: lScore,
+        volScore: vScore,
+        liqScore,
+      },
       source: "synthetic",
     };
   } catch (e) {
@@ -279,10 +277,8 @@ async function buildDashboardData() {
   return out;
 }
 
-/* ─────────────────────────────────────────
-   Netlify λ‑function handler
-────────────────────────────────────────── */
-export async function handler(event, context) {
+/* ───── Netlify λ‑function handler ───── */
+export async function handler() {
   try {
     const payload = await buildDashboardData();
     payload.timestamp = Date.now();
@@ -299,10 +295,7 @@ export async function handler(event, context) {
     console.error("Function error:", err);
     return {
       statusCode: 500,
-      body: JSON.stringify({
-        error: "Service unavailable",
-        details: err.message,
-      }),
+      body: JSON.stringify({ error: "Service unavailable", details: err.message }),
     };
   }
 }
