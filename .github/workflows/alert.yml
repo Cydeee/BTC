@@ -3,7 +3,7 @@ name: telegram-alert
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 min
+    - cron: "*/15 * * * *"
 
 jobs:
   alert:
@@ -16,9 +16,4 @@ jobs:
       - name: Install (no deps)
         run: npm install
       - name: Run alert
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
-          LIVE_URL:          ${{ secrets.LIVE_URL }}      # optional: mirror URL override
-          THRESHOLD:         ${{ secrets.THRESHOLD }}     # optional: score threshold
         run: npm run alert
