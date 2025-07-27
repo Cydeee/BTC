@@ -1,24 +1,24 @@
-name: High-Conviction Alert
+name: telegram-alert
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/15 * * * *"   # every 15 min
 
 jobs:
   alert:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v3
         with:
           node-version: "18"
-
-      - name: Run standalone alert
+      - name: Install (no deps)
+        run: npm install
+      - name: Run alert
         env:
-          TEST_ALERT: "0"
-        run: |
-          npm install  # no deps, but ensures package-lock exists
-          node .github/scripts/alert-live.js
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
+          LIVE_URL:          ${{ secrets.LIVE_URL }}      # optional: mirror URL override
+          THRESHOLD:         ${{ secrets.THRESHOLD }}     # optional: score threshold
+        run: npm run alert
