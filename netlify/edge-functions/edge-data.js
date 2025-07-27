@@ -1,29 +1,24 @@
 // netlify/edge-functions/edge-data.js
 export const config = {
-  // The Edge Function becomes live at https://<yoursite>/edge-data
-  path: "/edge-data",
-  cache: "manual"           // tell Netlify you will set headers yourself
+  path: "/edge-data",   // public route
+  cache: "manual"       // we'll control headers ourselves
 };
 
-export default async function handler() {
-  try {
-    const url = "https://api.coingecko.com/api/v3/simple/price" +
-                "?ids=bitcoin,ethereum&vs_currencies=usd";
-    const up  = await fetch(url, { headers: { accept: "application/json" } });
-    if (!up.ok) throw new Error(`CoinGecko ${up.status}`);
-    return new Response(
-      JSON.stringify({ ts: Date.now(), source: "coingecko", data: await up.json() }),
-      {
-        status: 200,
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "cache-control": "public, max-age=20, stale-while-revalidate=40",
-          "access-control-allow-origin": "*"      // safe for GPT Actions
-        }
-      }
-    );
-  } catch (err) {
-    return new Response(JSON.stringify({ error: "upstream_error", detail: err.message }),
-                        { status: 502, headers: { "content-type": "application/json" } });
-  }
+export default async function handler(request) {
+  /* Build absolute URL of your own serverless function */
+  const origin = new URL(request.url).origin;
+  const target = `${origin}/.netlify/functions/data`;
+
+  /* One internal fetch — no proxy credentials involved */
+  const upstream = await fetch(target, {
+    headers: { accept: "application/json" }
+  });
+
+  /* Clone body & headers */
+  const body    = await upstream.text();
+  const headers = new Headers(upstream.headers);
+  headers.set("access-control-allow-origin", "*");      // CORS for GPT mobile :contentReference[oaicite:2]{index=2}
+
+  /* Pass through original status and cache policy */
+  return new Response(body, { status: upstream.status, headers });
 }
