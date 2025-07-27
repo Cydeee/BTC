@@ -1,16 +1,13 @@
 #!/usr/bin/env node
 // .github/scripts/alert.js
 
-// ← read credentials & config from env
-const BOT       = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT      = process.env.TELEGRAM_CHAT_ID;
-const LIVE      = process.env.LIVE_URL   || "https://btcsignal.netlify.app/live.json";
-const THRESHOLD = Number(process.env.THRESHOLD) || 6;
+// ← hard‑coded Telegram credentials
+const BOT       = "8417682763:AAGZ1Darr0BgISB9JAG3RzHCQi-uqMylcOw";
+const CHAT      = "6038110897";
 
-if (!BOT || !CHAT) {
-  console.error("❌ Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
-  process.exit(1);
-}
+// mirror URL & threshold also inlined
+const LIVE      = "https://btcsignal.netlify.app/live.json";
+const THRESHOLD = 6;
 
 async function tg(msg) {
   await fetch(`https://api.telegram.org/bot${BOT}/sendMessage`, {
@@ -60,17 +57,4 @@ function score(raw) {
 }
 
 (async () => {
-  console.log("🔍 Fetching live:", LIVE);
-  const raw = await (await fetch(LIVE, { cache: "no-store" })).json();
-  const { long, short } = score(raw);
-  console.log("▶ Scores:", { long, short });
-
-  if (long >= THRESHOLD || short >= THRESHOLD) {
-    const dir = long >= THRESHOLD ? "LONG" : "SHORT";
-    const sc  = long >= THRESHOLD ? long : short;
-    await tg(`🚀 *High‑Conviction ${dir}* (score ${sc})`);
-    console.log("✅ Alert sent");
-  } else {
-    console.log("🚫 No signal");
-  }
-})();
+  consol
