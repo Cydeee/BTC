@@ -12,10 +12,10 @@
   "dataE": null,
   "dataF": null,
   "dataG": {
-    "totalMcapT": 3.95,
-    "mcap24hPct": -3.62,
+    "totalMcapT": 3.96,
+    "mcap24hPct": -3.52,
     "btcDominance": 59.33,
-    "ethDominance": 11.44
+    "ethDominance": 11.45
   },
   "dataH": {
     "fearGreed": "73 · Greed"
@@ -34,5 +34,5 @@
     "E: Cannot read properties of undefined (reading '15m')",
     "F: Unexpected end of JSON input"
   ],
-  "timestamp": 1753577909769
+  "timestamp": 1753578566628
 }
