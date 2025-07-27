@@ -12,9 +12,9 @@
   "dataE": null,
   "dataF": null,
   "dataG": {
-    "totalMcapT": 3.96,
-    "mcap24hPct": -3.26,
-    "btcDominance": 59.31,
+    "totalMcapT": 3.97,
+    "mcap24hPct": -3.24,
+    "btcDominance": 59.29,
     "ethDominance": 11.47
   },
   "dataH": {
@@ -34,5 +34,5 @@
     "E: Cannot read properties of undefined (reading '15m')",
     "F: Unexpected end of JSON input"
   ],
-  "timestamp": 1753579518176
+  "timestamp": 1753579798787
 }
