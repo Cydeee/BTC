@@ -8,12 +8,16 @@ on:
 jobs:
   alert:
     runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:    ${{ secrets.TELEGRAM_CHAT_ID }}
+      LIVE_URL:            ${{ secrets.LIVE_URL }}
+      THRESHOLD:           ${{ secrets.THRESHOLD }}
+      HTTPS_PROXY:         ${{ secrets.PROXY_URL }}   # optional later
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v3
         with:
           node-version: "18"
-      - name: Install (no deps)
-        run: npm install
-      - name: Run alert
-        run: npm run alert
+      - run: npm install
+      - run: npm run alert
