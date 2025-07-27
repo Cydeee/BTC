@@ -1,5 +1,3 @@
-# .github/workflows/fly-bootstrap.yml
-
 name: Bootstrap & Deploy Fly Proxy
 
 on:
@@ -21,10 +19,10 @@ jobs:
       - name: Fetch organization_id
         id: org
         run: |
-          # List orgs and take the first id
           ORG_ID=$(curl -s \
             -H "Authorization: Bearer $FLY_ORG_TOKEN" \
-            https://api.fly.io/api/v1/orgs | jq -r '.[0].id')
+            https://api.fly.io/api/v1/orgs \
+            | jq -r '.data[0].id')
           if [ -z "$ORG_ID" ] || [ "$ORG_ID" = "null" ]; then
             echo "❌ Failed to fetch organization_id" >&2
             exit 1
@@ -51,7 +49,6 @@ jobs:
       - name: Generate App‑Scoped Deploy Token
         id: token
         run: |
-          APP_NAME=${APP_NAME}
           OUT=$(curl -s \
             -X POST https://api.fly.io/api/v1/apps/$APP_NAME/deploy_tokens \
             -H "Authorization: Bearer $FLY_ORG_TOKEN" \
