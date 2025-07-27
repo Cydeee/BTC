@@ -8,6 +8,6 @@
     "alert"        : "node .github/scripts/alert.js"
   },
   "dependencies": {
-    "https-proxy-agent": "^5.0.1"   // ← NEW LINE
+    "https-proxy-agent": "^5.0.1"
   }
 }
