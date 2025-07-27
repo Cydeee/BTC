@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "generate-live": "node scripts/generate-live.js",
-    "alert": "node .github/scripts/alert.js"
+    "alert"        : "node .github/scripts/alert.js"
+  },
+  "dependencies": {
+    "https-proxy-agent": "^5.0.1"   // ← NEW LINE
   }
 }
