@@ -229,8 +229,7 @@ async function buildDashboardData() {
   try {
     const h4 = await proxyJson(`/fapi/v1/klines?symbol=${S}&interval=4h&limit=96`);
     const d1 = await proxyJson(`/fapi/v1/klines?symbol=${S}&interval=1d&limit=30`);
-    const w1 = await proxyJson(`/fapi/v1/klines?symbol=${
-      S}&interval=1w&limit=12`);
+    const w1 = await proxyJson(`/fapi/v1/klines?symbol=${S}&interval=1w&limit=12`);
     const calcVP = bars => {
       const buckets = {};
       bars.forEach(b => {
