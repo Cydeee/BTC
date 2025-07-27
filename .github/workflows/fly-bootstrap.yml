@@ -9,7 +9,6 @@ jobs:
   bootstrap-and-deploy:
     runs-on: ubuntu-latest
     env:
-      # Hard‑coded org‑scoped Fly token (not using GitHub Secrets)
       FLY_ORG_TOKEN: FlyV1 fm2_lJPECAAAAAAACYwhxBCaosxGd4RXeMIy27qwjjS5wrVodHRwczovL2FwaS5mbHkuaW8vdjGUAJLOABJaHx8Lk7lodHRwczovL2FwaS5mbHkuaW8vYWFhL3YxxDzCml+IhhqhitGsnZpIPk2kqga4e+aEe7DxG3Hf2JzxtPNRGx0/xhQcZtIwTHdzyHHDi4CQfHnUXRxG447ETvXvkzdba3Lxs+fWODgpBgQWOmT4h8wbOPNLoOWCgEx9FzjT2F6hL4SBeQxIRrmMC94bjLFduDRG0GX14ZlkXkY99PRqnG3tVxvsw7WP4cQgfLOUY7+n9h932dWeBHz0JE93nhlV3nIOMX3JTE3QMM8=,fm2_lJPETvXvkzdba3Lxs+fWODgpBgQWOmT4h8wbOPNLoOWCgEx9FzjT2F6hL4SBeQxIRrmMC94bjLFduDRG0GX14ZlkXkY99PRqnG3tVxvsw7WP4cQQX2sm5vFX4Vq0nMRaaKyLaMO5aHR0cHM6Ly9hcGkuZmx5LmlvL2FhYS92MZgEks5ohYBbzwAAAAEkfZ55F84AEaOYCpHOABGjmAzEELg5DVLKiBw0EdnSWh0Ye9nEIJHKvZ4+cwSnZtaklcVsAgliGow/b9ZCWqIh31/sN1Ly
       APP_NAME: binance-proxy
       REGION: fra
@@ -19,36 +18,51 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Fetch organization_id
+        id: org
+        run: |
+          # List orgs and take the first id
+          ORG_ID=$(curl -s \
+            -H "Authorization: Bearer $FLY_ORG_TOKEN" \
+            https://api.fly.io/api/v1/orgs | jq -r '.[0].id')
+          if [ -z "$ORG_ID" ] || [ "$ORG_ID" = "null" ]; then
+            echo "❌ Failed to fetch organization_id" >&2
+            exit 1
+          fi
+          echo "::set-output name=ORG_ID::$ORG_ID"
+
       - name: Create Fly App (if not exists)
         run: |
-          resp=$(curl -s -o /dev/null -w "%{http_code}" \
+          ORG_ID=${{ steps.org.outputs.ORG_ID }}
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             -X POST https://api.fly.io/api/v1/apps \
             -H "Authorization: Bearer $FLY_ORG_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "{\"name\":\"$APP_NAME\"}")
-          if [ "$resp" = "409" ]; then
-            echo "App $APP_NAME already exists → skipping"
-          elif [ "$resp" = "201" ]; then
-            echo "Created app $APP_NAME"
+            -d "{\"name\":\"$APP_NAME\",\"organization_id\":\"$ORG_ID\"}")
+          if [ "$STATUS" = "409" ]; then
+            echo "⚠️ App $APP_NAME already exists → skipping"
+          elif [ "$STATUS" = "201" ]; then
+            echo "✅ Created app $APP_NAME"
           else
-            echo "Unexpected status $resp creating app" >&2
+            echo "❌ Unexpected status $STATUS creating app" >&2
             exit 1
           fi
 
       - name: Generate App‑Scoped Deploy Token
         id: token
         run: |
-          out=$(curl -s \
+          APP_NAME=${APP_NAME}
+          OUT=$(curl -s \
             -X POST https://api.fly.io/api/v1/apps/$APP_NAME/deploy_tokens \
             -H "Authorization: Bearer $FLY_ORG_TOKEN" \
             -H "Content-Type: application/json" \
             -d '{"name":"github-deploy","expiry":"720h"}')
-          token=$(echo "$out" | jq -r .token)
-          if [ -z "$token" ] || [ "$token" = "null" ]; then
-            echo "Failed to create deploy token: $out" >&2
+          TOKEN=$(echo "$OUT" | jq -r .token)
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "❌ Failed to create deploy token: $OUT" >&2
             exit 1
           fi
-          echo "::set-output name=DEPLOY_TOKEN::$token"
+          echo "::set-output name=DEPLOY_TOKEN::$TOKEN"
 
       - name: Setup Flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
