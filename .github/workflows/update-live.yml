@@ -1,39 +1,34 @@
+# .github/workflows/update-live.yml
 name: refresh-live-json
 
 permissions:
-  contents: write   # ← gives the default token push rights
+  contents: write
 
 on:
-  workflow_dispatch:
   schedule:
     - cron: "*/15 * * * *"
+  workflow_dispatch:
 
 jobs:
-  build:
+  mirror:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v3
-        with: { node-version: "18" }
-
-      - name: Install (creates lockfile if missing)
+        with: node-version: "18"
+      - name: Install (instant, no deps)
         run: npm install
-
-      - name: Build live.json
+      - name: Fetch & write live.json
         run: npm run generate-live
-
-      - name: Commit & push
+      - name: Commit & push live.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add public/live.json package-lock.json || true
+          git add public/live.json
           if git diff --cached --quiet; then
-            echo "ℹ️  nothing to commit"
+            echo "ℹ️  No changes"
             exit 0
           fi
           git commit -m "chore: refresh live.json"
