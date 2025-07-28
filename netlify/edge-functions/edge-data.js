@@ -22,7 +22,7 @@ const hdrHTML = () => ({ ...cors(),
 });
 
 /*──────────────────── safeJson via VPS proxy ─────────*/
-const PROXY_BASE = "https://fr-proxy.yourdomain.com/proxy/";  // ← replace with your endpoint
+const PROXY_BASE = "https://164.132.56.117/proxy/";           //
 const safeJson = async url => {
   try{
     const r = await fetch(PROXY_BASE + encodeURIComponent(url));
