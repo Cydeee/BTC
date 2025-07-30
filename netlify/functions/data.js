@@ -1,15 +1,20 @@
 /*  Netlify Node 18 Edge Function – data.js
     Builds a BTC dashboard JSON with live price, indicators, VPVR, levels.
     Outbound requests honour HTTPS_PROXY if set.
+    Added earlier: 4 h ADX-14, abs./percentile OI, sessionRelVol, cycle-anchored VWAP.
+    NEW in this version ──────────────────────────────────────────────────────
+    • dataF.swings   → last double-top / double-bottom pivots
+    • dataF.neckline → price of the neckline (null if none)
+    • dataF.neckBreak→ true when last candle has broken that neckline
 */
 
 import fetch from "node-fetch";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
-/* ───────── HTTP helper ───────── */
+/* ───────── fetch helper ───────── */
 const AGENT = process.env.HTTPS_PROXY ? new HttpsProxyAgent(process.env.HTTPS_PROXY) : undefined;
-const safeJson = async (u) => {
-  const r = await fetch(u, { agent: AGENT, timeout: 20_000 });
+const safeJson = async (url) => {
+  const r = await fetch(url, { agent: AGENT, timeout: 20_000 });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 };
@@ -50,7 +55,7 @@ const atr = (h, l, c, p) => {
 const roc = (a, n) =>
   a.length >= n + 1 ? ((a.at(-1) - a.at(-(n + 1))) / a.at(-(n + 1))) * 100 : 0;
 
-/* Wilder ADX-14 (only used on 4 h) */
+/* Wilder-ADX-14 (4 h only) */
 function adx(h, l, c, p = 14) {
   if (h.length < p + 1) return 0;
   const dmP = [],
@@ -80,7 +85,8 @@ function adx(h, l, c, p = 14) {
   return +sma(dx.slice(-p), p).toFixed(2);
 }
 
-/* ───────── Swing / neckline helpers ───────── */
+/* ───────── Swing / neckline helpers ─────────
+   Very light-weight: no external libs, <200 ms runtime   */
 function zigzag(bars, depth = 6, pct = 0.15) {
   const piv = [];
   for (let i = depth; i < bars.length - depth; i++) {
@@ -98,26 +104,29 @@ function neckBreak(pivs, bars) {
   const cPrev = bars.at(-2).c,
     cNow = bars.at(-1).c;
 
+  /* double-top */
   if (H.length === 2) {
     const neck = Math.min(...bars.slice(H[0].idx, H[1].idx + 1).map((b) => b.l));
     return {
-      neckline: neck,
-      ok: cPrev > neck && cNow < neck,
       swings: { H1: H[0].px, H2: H[1].px, L1: null, L2: null },
+      neckline: neck,
+      neckBreak: cPrev > neck && cNow < neck,
     };
   }
+  /* double-bottom */
   if (L.length === 2) {
     const neck = Math.max(...bars.slice(L[0].idx, L[1].idx + 1).map((b) => b.h));
     return {
-      neckline: neck,
-      ok: cPrev < neck && cNow > neck,
       swings: { H1: null, H2: null, L1: L[0].px, L2: L[1].px },
+      neckline: neck,
+      neckBreak: cPrev < neck && cNow > neck,
     };
   }
+  /* nothing */
   return {
-    neckline: null,
-    ok: false,
     swings: { H1: null, H2: null, L1: null, L2: null },
+    neckline: null,
+    neckBreak: false,
   };
 }
 
@@ -125,6 +134,7 @@ function neckBreak(pivs, bars) {
 async function buildDashboardData() {
   const SYMBOL = "BTCUSDT";
   const LIMIT = 250;
+
   const out = {
     dataA: {},
     dataB: null,
@@ -137,7 +147,7 @@ async function buildDashboardData() {
     errors: [],
   };
 
-  /* ── Block A – Indicators ───────────────── */
+  /* ── A · Indicators ─────────────────────── */
   for (const tf of ["15m", "1h", "4h", "1d"]) {
     try {
       const kl = await safeJson(
@@ -161,7 +171,7 @@ async function buildDashboardData() {
     }
   }
 
-  /* ── Block B – Derivatives ──────────────── */
+  /* ── B · Derivatives (unchanged logic) ──── */
   try {
     const fr = await safeJson(
       `https://fapi.binance.com/fapi/v1/fundingRate?symbol=${SYMBOL}&limit=1000`
@@ -206,7 +216,7 @@ async function buildDashboardData() {
     out.errors.push(`B: ${e.message}`);
   }
 
-  /* ── Block C – ROC ──────────────────────── */
+  /* ── C · ROC – unchanged ────────────────── */
   for (const tf of ["15m", "1h", "4h", "1d"]) {
     try {
       const kl = await safeJson(
@@ -219,9 +229,8 @@ async function buildDashboardData() {
     }
   }
 
-  /* ── Block D – Volume & CVD ─────────────── */
+  /* ── D · Volume & CVD – unchanged ───────── */
   try {
-    /* session-relative vol */
     const h240 = await safeJson(
       `https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=1h&limit=240`
     );
@@ -238,9 +247,9 @@ async function buildDashboardData() {
 
     const win = { "15m": 0.25, "1h": 1, "4h": 4, "24h": 24 };
     out.dataD.cvd = {};
-    for (const [lbl, hours] of Object.entries(win)) {
+    for (const [lbl, hrs] of Object.entries(win)) {
       const end = Date.now(),
-        start = end - hours * 3_600_000;
+        start = end - hrs * 3_600_000;
       const kl = await safeJson(
         `https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=1m&startTime=${start}&endTime=${end}&limit=1500`
       );
@@ -273,12 +282,12 @@ async function buildDashboardData() {
     out.errors.push(`D: ${e.message}`);
   }
 
-  /* ── Block E – Stress index ─────────────── */
+  /* ── E · Stress index – unchanged logic ── */
   try {
     const b = Math.min(3, Math.abs(+out.dataB.fundingZ || 0));
     const l = out.dataB.oi30dPct ? Math.min(3, (out.dataB.oi30dPct - 50) / 10) : 0;
-    const vFlag = out.dataD.relative["15m"];
-    const v = vFlag === "very high" ? 2 : vFlag === "high" ? 1 : 0;
+    const vFlag = out.dataD.relative["15m"],
+      v = vFlag === "very high" ? 2 : vFlag === "high" ? 1 : 0;
     const liq = out.dataB.liquidations || {};
     const imb = Math.abs((liq.long24h || 0) - (liq.short24h || 0));
     const q = Math.min(2, imb / 1e6);
@@ -292,7 +301,7 @@ async function buildDashboardData() {
     out.errors.push(`E: ${e.message}`);
   }
 
-  /* ── Block F – VPVR, levels, swings ─────── */
+  /* ── F · VPVR + levels + swings ─────────── */
   try {
     const h4 = await safeJson(
       `https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=4h&limit=96`
@@ -307,8 +316,8 @@ async function buildDashboardData() {
       const bkt = {};
       bars.forEach((b) => {
         const px = (+b[2] + +b[3] + +b[4]) / 3,
-          k = Math.round(px / 100) * 100;
-        bkt[k] = (bkt[k] || 0) + +b[5];
+          key = Math.round(px / 100) * 100;
+        bkt[key] = (bkt[key] || 0) + +b[5];
       });
       return { poc: +Object.entries(bkt).sort((a, b) => b[1] - a[1])[0][0], buckets: bkt };
     };
@@ -316,20 +325,18 @@ async function buildDashboardData() {
     const last1m = await safeJson(
       `https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=1m&limit=1`
     );
-    const live = +last1m[0][4];
+    const livePx = +last1m[0][4];
 
-    /* initialise dataF so later inserts extend it */
+    /* initialise dataF with defaults */
     out.dataF = {
       vpvr: { "4h": vp(h4), "1d": vp(d1), "1w": vp(w1) },
-      price: +live.toFixed(2),
-
-      /* default (null) swing keys so they always show */
+      price: +livePx.toFixed(2),
       swings: { H1: null, H2: null, L1: null, L2: null },
       neckline: null,
       neckBreak: false,
     };
 
-    /* swing / neckline detection */
+    /* swing / neckline detection (120 1-min bars) */
     try {
       const m120 = await safeJson(
         `https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=1m&limit=120`
@@ -339,16 +346,16 @@ async function buildDashboardData() {
       const nb = neckBreak(piv, bars);
       out.dataF.swings = nb.swings;
       out.dataF.neckline = nb.neckline;
-      out.dataF.neckBreak = nb.ok;
+      out.dataF.neckBreak = nb.neckBreak;
     } catch (e) {
       out.errors.push(`F-swing: ${e.message}`);
     }
 
-    /* anchored cycle-VWAP */
+    /* cycle-anchored VWAP (lowest weekly close in last 52 w) */
     const closes = w1.map((r) => +r[4]),
       lows52 = closes.slice(-52);
-    const idx = lows52.indexOf(Math.min(...lows52));
-    const anchorTs = +w1[w1.length - 52 + idx][0];
+    const idx = lows52.indexOf(Math.min(...lows52)),
+      anchorTs = +w1[w1.length - 52 + idx][0];
     const daily = await safeJson(
       `https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=1d&startTime=${anchorTs}&limit=1000`
     );
@@ -362,7 +369,7 @@ async function buildDashboardData() {
     });
     out.dataF.avwapCycle = +(num / den).toFixed(2);
 
-    /* daily pivot, VWAP band, HH20/LL20 */
+    /* daily pivot & VWAP band (unchanged) */
     const yesterday = d1.at(-2);
     if (yesterday) {
       const yH = +yesterday[2],
@@ -410,7 +417,7 @@ async function buildDashboardData() {
     out.errors.push(`F: ${e.message}`);
   }
 
-  /* ── Block G – Macro ────────────────────── */
+  /* ── G · Macro – unchanged ──────────────── */
   try {
     const g = (await safeJson("https://api.coingecko.com/api/v3/global")).data;
     out.dataG = {
@@ -423,7 +430,7 @@ async function buildDashboardData() {
     out.errors.push(`G: ${e.message}`);
   }
 
-  /* ── Block H – Sentiment ─────────────────── */
+  /* ── H · Sentiment – unchanged ──────────── */
   try {
     const d = (await safeJson("https://api.alternative.me/fng/?limit=1")).data?.[0];
     if (!d) throw new Error("FNG missing");
