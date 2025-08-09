@@ -3,19 +3,11 @@
     v2 ▸ adds unified Quality-score (1-10) with per-play weights & tiered bonuses.
            Alerts STILL print when a setup is below its gate – they’re just labelled.
 
-    v2.2 ▸ fixes & win-rate upgrades + robust fetch
-      - Neutral (BREAK) plays don’t misuse crowd factor in scoring
-      - Position sizing display no longer (incorrectly) multiplies by leverage; uses ACCOUNT_EQUITY (default 10k)
-      - Opening-Range (#7) enforces ≥1R target; HH-based tweaks preserved
-      - EMA Pull-back (#6) TP anchored to entry (EMA) rather than current price
-      - Structure “near” threshold scales with ATR regime instead of fixed 0.7%
-      - Safer swings null-guard in Telegram builder (no crash if missing)
-      - VWAP band width computed symmetrically (upper/lower vs mid)
-      - Liq-Sweep entry nudge widened slightly (front-run more robust)
-      - Per-play TTL to reduce duplicates + A-tier (quality ≥ 8) bypass for global mute
-      - Fetch timeout now with retries/backoff via AbortController
-      - Only send plays that pass their quality gate; sub-gate stay in console audit
-      - Optional soft-fail on network aborts to avoid failing CI
+    v2.3 ▸ regime-aware gating (trend vs range) + robustness
+      - Detect HTF regime (4h/1d) and LTF regime (15m) once per tick
+      - Adjust per-play gates or deny plays that don’t fit the regime
+      - Keeps Telegram output identical in format (same lines/labels/emojis)
+      - Retains earlier fixes: sizing, TTL, A-tier bypass, robust fetch, etc.
 */
 
 import fs   from "fs";
@@ -207,6 +199,93 @@ function computeQualityScore(d,play){
   return score;
 }
 
+/* ───────── 1.5 ▸ regime detection & gate adjusters -------------------------------- */
+
+/* Classify market regime using available fields */
+function computeRegime(d){
+  const price=$(d.dataF.price);
+  const ema50d=$(d.dataA["1d"]?.ema50);
+  const ema200d=$(d.dataA["1d"]?.ema200);
+  const ema50_4h=$(d.dataA["4h"]?.ema50);
+  const adx4h=$(d.dataA["4h"]?.adx14);
+  const relVol15=d.dataD?.relative?.["15m"];
+  const volHigh15 = relVol15==="high" || relVol15==="very high";
+  const atr15=$(d.dataA["15m"]?.atrPct);        // %
+  const roc15=Math.abs($(d.dataC["15m"]?.roc10)); // %
+  const bandW=vwapBandWidthPct(d);              // %
+
+  // HTF trend using EMAs and ADX + price location
+  const emaTrendUp   = ema50d && ema200d && ema50d > ema200d;
+  const emaTrendDown = ema50d && ema200d && ema50d < ema200d;
+  const adxStrong    = $(adx4h) >= 25;
+  const above4h50    = price > $(ema50_4h);
+  const below4h50    = price < $(ema50_4h);
+
+  let htf="range";
+  if ((emaTrendUp && above4h50) || (adxStrong && above4h50)) htf="up";
+  else if ((emaTrendDown && below4h50) || (adxStrong && below4h50)) htf="down";
+
+  // LTF compression/expansion
+  const bandOK = bandW!=null && bandW <= 2.0;
+  const lowATR = atr15!=null && atr15 <= 0.8;
+  const compression = !!(bandOK && lowATR && !volHigh15);
+  const expansion   = !compression && ((roc15!=null && atr15!=null && roc15 >= atr15) || volHigh15);
+
+  const regime = { htf, adxStrong, ltfCompression: compression, ltfExpansion: expansion, bandW, atr15, relVol15 };
+  dbg(`Regime: htf=${htf}, adxStrong=${adxStrong}, ltfCompression=${compression}, ltfExpansion=${expansion}, bandW=${bandW?.toFixed?.(2)}%, atr15=${atr15}`);
+  return regime;
+}
+
+/* Per-signal regime-aware gate adjustment (or denial) */
+function regimeAdjustGate(p, d, R){
+  let gateAdj = 0;
+  let deny = false;
+
+  const oppToHTF =
+    (R.htf==="up"   && p.dir==="SHORT") ||
+    (R.htf==="down" && p.dir==="LONG");
+
+  switch(p.id){
+    /* Trend continuation plays */
+    case 1: // HH20 Break-Retest (LONG)
+    case 2: // AVWAP Reclaim (LONG)
+    case 6: // EMA Pull-back (LONG)
+    case 9: // Session Kick (LONG/SHORT)
+      if(R.htf==="range") gateAdj += 1;                  // tougher in ranges
+      if(R.adxStrong && oppToHTF) gateAdj += 2;          // much tougher against strong trend
+      break;
+
+    /* Mean-reversion plays */
+    case 4: // Liq-Sweep
+    case 8: // VWAP Fade
+      if(R.adxStrong && R.htf!=="range" && !d.dataF.neckBreak) gateAdj += 2; // demand more on strong trend unless neckBreak
+      if(R.ltfExpansion && !R.ltfCompression) gateAdj += 1;  // expansion regime: fades are trickier
+      break;
+
+    /* Breakout from balance (needs compression first) */
+    case 5: // High-OI Box (BREAK)
+    case 7: // Opening-Range (BREAK)
+      if(!R.ltfCompression){
+        deny = true; // not a balance → skip (keeps TG quiet)
+        dbg(`Regime deny: Play #${p.id} requires LTF compression`);
+      }
+      break;
+
+    /* Contrarian crowd play */
+    case 3: // Funding Fade
+      if(R.adxStrong){
+        // Extra tough if fading a strong HTF trend
+        if(oppToHTF) gateAdj += 2;
+        else gateAdj += 1;
+      }
+      break;
+
+    default: break;
+  }
+
+  return { gateAdj, deny };
+}
+
 /* ───────── 2 ▸ play generator ------------------------------------------------------ */
 function detectPlays(d){
   const plays=[], price=$(d.dataF.price);
@@ -260,7 +339,7 @@ function detectPlays(d){
     const ema=d.dataA["4h"].ema50;
     const entry = ema*0.999;
     const stop  = ema*0.99;     // ~ -1%
-    const tp1   = entry*1.02;   // +2% from entry (≥ ~2R vs 1% SL)
+    const tp1   = entry*1.02;   // +2% from entry
     plays.push({id:6,dir:"LONG",name:"EMA Pull-back",
       entry:[entry],stop,tp1,lev:[3,10]});
   }
@@ -302,24 +381,22 @@ function detectPlays(d){
       entry:[price],stop:price*(1-s*0.004),tp1:price*(1+s*0.01),lev:[5,15]});
   }
 
-  /* ---- score & gate pass ------------------------------------------------ */
+  /* ---- score (quality) -------------------------------------------------- */
   const final=[];
   for(const p of plays){
     const q = computeQualityScore(d,p);
-    const gate = MIN_GATE[p.id]||5;
     p.quality = q;
-    p.belowGate = q < gate;
-    if(p.belowGate) dbg(`Play #${p.id} scored ${q} < gate ${gate} (will tag as informational)`);
-    final.push(p);                            // keep for audit; filter later for TG
+    p.belowGate = false; // set later with regime-adjusted gate
+    final.push(p);
   }
   return final;
 }
 
-/* quick one-liner */
+/* quick one-liner (console only) */
 const playLine = p =>
   `• #${p.id} (${p.quality}/10${p.belowGate?"⤓":""}) ${p.name} ${p.dir} @${fmt$(p.entry[0])}${p.entry[1]?`-${fmt$(p.entry[1])}`:""} SL:${fmt$(p.stop)}`;
 
-/* ───────── 3 ▸ HTML builder -------------------------------------------------------- */
+/* ───────── 3 ▸ HTML builder (Telegram output unchanged) --------------------------- */
 function buildMsg(p,d){
   const snap=
 `• FundingZ <b>${esc(d.dataB.fundingZ)}</b> | OI30d <b>${esc(d.dataB.oi30dPct)}%</b>
@@ -332,7 +409,7 @@ function buildMsg(p,d){
     ? `\nSwings ➜ H1 ${fmt$(d.dataF.swings.H1)} • H2 ${fmt$(d.dataF.swings.H2)} • neckline ${fmt$(d.dataF.neckline)} (broken? ${d.dataF.neckBreak?"yes":"no"})`
     : "";
 
-  // corrected position sizing display: notional sized to risk, no leverage multiplier
+  // position sizing display: notional sized to risk, no leverage multiplier
   const entry0 = p.entry[0];
   const risk$  = acctEq * (riskPc/100);
   const riskD  = Math.abs(entry0 - p.stop);
@@ -396,10 +473,22 @@ function saveCache(path,obj){
     const fundingZ= parseFloat(dash.dataB.fundingZ);
     const bigLiq  = Math.max($(dash.dataB.liquidations?.long1h),$(dash.dataB.liquidations?.short1h));
 
+    // Compute regime once
+    const REGIME = computeRegime(dash);
+
     const plays = detectPlays(dash);
 
-    /* audit */
-    const idList=plays.map(p=>`${p.id}(${p.quality})`).join(",")||"none";
+    // Apply regime-aware gate adjustments / denials BEFORE audit & sending
+    for(const p of plays){
+      const { gateAdj, deny } = regimeAdjustGate(p, dash, REGIME);
+      const baseGate = MIN_GATE[p.id] || 5;
+      const gate = Math.max(1, baseGate + gateAdj);
+      p.belowGate = deny ? true : (p.quality < gate);
+      if(deny) dbg(`Play #${p.id} denied by regime (gate ${baseGate}➜X)`); else if(p.quality < gate) dbg(`Play #${p.id} gated by regime: score ${p.quality} < gate ${gate} (base ${baseGate} + ${gateAdj})`);
+    }
+
+    /* audit (reflects regime-adjusted gates) */
+    const idList=plays.map(p=>`${p.id}(${p.quality}${p.belowGate?"⤓":""})`).join(",")||"none";
     console.log(`ALERT SUMMARY | price=${fmt$(price)}  ${HH20?`HH20Δ=${pct(price,HH20).toFixed(2)}%  `:""}${avwap?`AVWAPΔ=${pct(price,avwap).toFixed(2)}%  `:""}fundingZ=${fundingZ}  bigLiq=$${fmt(bigLiq/1e6,0)}M  plays=[${idList}]`);
     plays.forEach(p=>console.log(playLine(p)));
     if(isDbg){
@@ -408,12 +497,10 @@ function saveCache(path,obj){
       console.log("=================");
     }
 
-    if(!plays.length) return;
-
-    /* quality gate filter for Telegram (keep sub-gate only for logs) */
+    // Nothing detected or everything gated/denied
     const sendable = plays.filter(p=>!p.belowGate);
-    if(!sendable.length) {
-      console.log("No plays passed quality gates – nothing to send.");
+    if(!sendable.length){
+      console.log("No plays passed (after regime adjust) – nothing to send.");
       return;
     }
 
