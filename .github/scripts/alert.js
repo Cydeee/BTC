@@ -3,7 +3,7 @@
     v2 ▸ adds unified Quality-score (1-10) with per-play weights & tiered bonuses.
            Alerts STILL print when a setup is below its gate – they’re just labelled.
 
-    v2.1 ▸ fixes & win-rate upgrades
+    v2.2 ▸ fixes & win-rate upgrades + robust fetch
       - Neutral (BREAK) plays don’t misuse crowd factor in scoring
       - Position sizing display no longer (incorrectly) multiplies by leverage; uses ACCOUNT_EQUITY (default 10k)
       - Opening-Range (#7) enforces ≥1R target; HH-based tweaks preserved
@@ -13,8 +13,9 @@
       - VWAP band width computed symmetrically (upper/lower vs mid)
       - Liq-Sweep entry nudge widened slightly (front-run more robust)
       - Per-play TTL to reduce duplicates + A-tier (quality ≥ 8) bypass for global mute
-      - Fetch timeout uses AbortController (node-fetch v3+)
+      - Fetch timeout now with retries/backoff via AbortController
       - Only send plays that pass their quality gate; sub-gate stay in console audit
+      - Optional soft-fail on network aborts to avoid failing CI
 */
 
 import fs   from "fs";
@@ -29,17 +30,23 @@ const {
   HTTPS_PROXY       : PROXY,
   DEBUG,
   RISK_PCT,
-  ACCOUNT_EQUITY
+  ACCOUNT_EQUITY,
+  FETCH_TIMEOUT_MS,
+  FETCH_RETRIES,
+  SOFT_FAIL
 } = process.env;
 
 if (!BOT || !CHAT || !LIVE) {
   console.error("❌  Missing env vars (BOT, CHAT, LIVE_URL)"); process.exit(1);
 }
 
-const agent   = PROXY ? new HttpsProxyAgent(PROXY) : undefined;
-const riskPc  = parseFloat(RISK_PCT) || 0.5;
-const acctEq  = parseFloat(ACCOUNT_EQUITY) || 10_000;   // new: account equity baseline for sizing display
-const isDbg   = DEBUG === "true";
+const agent        = PROXY ? new HttpsProxyAgent(PROXY) : undefined;
+const riskPc       = parseFloat(RISK_PCT) || 0.5;
+const acctEq       = parseFloat(ACCOUNT_EQUITY) || 10_000; // for sizing display only
+const isDbg        = DEBUG === "true";
+const fetchTimeout = parseInt(FETCH_TIMEOUT_MS || "", 10) || 45_000;
+const fetchRetries = parseInt(FETCH_RETRIES || "", 10) || 2; // total attempts = retries+1
+const softFail     = SOFT_FAIL === "true";
 
 /* ───────── helpers ---------------------------------------------------------------- */
 const $   = n => Number(n || 0);
@@ -59,14 +66,29 @@ async function tg(html){
   if(!j.ok) throw new Error(`Telegram error: ${j.description}`);
 }
 
-// AbortController timeout wrapper for node-fetch v3+
-async function safeJson(u,timeoutMs=20_000){
-  const ctrl = new AbortController(); const t = setTimeout(()=>ctrl.abort(), timeoutMs);
-  try{
-    const r = await fetch(u,{agent,signal:ctrl.signal});
-    if(!r.ok) throw new Error(`HTTP ${r.status}`);
-    return await r.json();
-  } finally { clearTimeout(t); }
+// Retry + backoff wrapper for node-fetch v3+
+async function safeJson(u, opt) {
+  const { timeoutMs = fetchTimeout, retries = fetchRetries } =
+    typeof opt === "number" ? { timeoutMs: opt, retries: fetchRetries } :
+    (opt || {});
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const r = await fetch(u, { agent, signal: ctrl.signal });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return await r.json();
+    } catch (err) {
+      const isAbort = err?.name === "AbortError" || err?.type === "aborted";
+      dbg(`safeJson attempt ${attempt + 1} failed: ${isAbort ? "AbortError" : err?.message}`);
+      if (attempt === retries) throw err;
+      const wait = Math.min(30_000, (500 << attempt) + Math.floor(Math.random() * 300)); // exp backoff + jitter
+      await new Promise(res => setTimeout(res, wait));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 }
 
 /* ───────── 1 ▸ quality-score engine ---------------------------------------------- */
@@ -91,8 +113,8 @@ const MIN_GATE={1:6,2:6,3:5,4:5,5:6,6:5,7:5,8:5,9:5};
 /* tiered catalyst bonuses (+0/+1/+2) */
 function vwapBandWidthPct(d){
   const up=$(d.dataF.levels?.vwapUpper), vw=$(d.dataF.levels?.vwap), lo=$(d.dataF.levels?.vwapLower);
-  if(up && lo && vw) return ((up-lo)/(2*vw))*100;           // symmetric width around mid
-  if(up && vw)         return pct(up,vw);                   // fallback (original behavior)
+  if(up && lo && vw) return ((up-lo)/(2*vw))*100; // symmetric width around mid
+  if(up && vw)         return pct(up,vw);         // fallback to original behavior
   return null;
 }
 function playBonus(p,d){
@@ -159,7 +181,7 @@ function computeQualityScore(d,play){
   /* 4 ▸ Structure confluence (ATR-scaled proximity) */
   const vwap=$(d.dataF.levels?.vwap); const poc=$(d.dataF.vpvr?.["4h"]?.poc); const neck=$(d.dataF.neckline);
   const atr15 = $(d.dataA["15m"].atrPct);
-  const tolPct = Math.max(0.35*atr15, 0.5); // min 0.5%, scales up with ATR regime
+  const tolPct = Math.max(0.35*atr15, 0.5); // min 0.5%, scales up with ATR
   const near = lvl=>lvl && Math.abs(price-lvl)/price*100<=tolPct;
   let confl=0;
   if(near(vwap)) confl++;
@@ -190,7 +212,6 @@ function detectPlays(d){
   const plays=[], price=$(d.dataF.price);
   const distOK =(lvl,p=5)=>lvl&&Math.abs(lvl-price)/price*100<=p;
 
-  /* existing rule-set (with surgical tweaks) … */
   /* ------------------------------------------------ Play #1 HH20 Break-Retest */
   const HH20=$(d.dataF.levels?.HH20);
   if(distOK(HH20)&&price>HH20*1.001){
@@ -221,7 +242,7 @@ function detectPlays(d){
   const atr15=$(d.dataA["15m"].atrPct);
   if(bigLiq>=25e6&&atr15<=1.5){
     const dir=$(liq.short1h)>$(liq.long1h)?"LONG":"SHORT",s=dir==="LONG"?1:-1;
-    // widen tiny front-run a touch (0.07% vs 0.03%) for reliability
+    // widened tiny front-run to ~0.07% for reliability
     plays.push({id:4,dir,name:"Liq-Sweep",
       entry:[price-price*0.0007*s],stop:price-price*0.004*s,tp1:price+price*0.004*s,lev:[10,50]});
   }
@@ -237,12 +258,11 @@ function detectPlays(d){
   const adx14=$(d.dataA["4h"].adx14);
   if(adx14>20&&d.dataA["1d"].ema50>d.dataA["1d"].ema200&&price<d.dataA["4h"].ema50){
     const ema=d.dataA["4h"].ema50;
-    // TP anchored to entry (EMA) to keep consistent R
     const entry = ema*0.999;
-    const stop  = ema*0.99;    // ~ -1%
-    const tp1   = entry*1.02;  // +2% from entry (≥ ~2R vs 1% SL)
+    const stop  = ema*0.99;     // ~ -1%
+    const tp1   = entry*1.02;   // +2% from entry (≥ ~2R vs 1% SL)
     plays.push({id:6,dir:"LONG",name:"EMA Pull-back",
-      entry:[entry],stop, tp1, lev:[3,10]});
+      entry:[entry],stop,tp1,lev:[3,10]});
   }
 
   /* ------------------------------------------------ Play #7 Opening-Range */
@@ -251,11 +271,9 @@ function detectPlays(d){
     // Enforce ≥1R: SL = atr%, TP1 >= 1.5R (rr=1.5)
     const slFrac = atr15/100;
     const rr = 1.5;
-    const dir="BREAK";
-    const s=1; // sign not used for BREAK math here
-    const stop = price*(1 - slFrac);                  // -ATR%
-    const tp1  = price*(1 + slFrac*rr);               // +rr*ATR%
-    plays.push({id:7,dir,name:"Opening-Range",
+    const stop = price*(1 - slFrac);        // -ATR%
+    const tp1  = price*(1 + slFrac*rr);     // +rr*ATR%
+    plays.push({id:7,dir:"BREAK",name:"Opening-Range",
       entry:[price],stop,tp1,lev:[10,25]});
   }
 
@@ -314,12 +332,12 @@ function buildMsg(p,d){
     ? `\nSwings ➜ H1 ${fmt$(d.dataF.swings.H1)} • H2 ${fmt$(d.dataF.swings.H2)} • neckline ${fmt$(d.dataF.neckline)} (broken? ${d.dataF.neckBreak?"yes":"no"})`
     : "";
 
-  // corrected position sizing display: show notional sized to risk, no leverage multiplier
+  // corrected position sizing display: notional sized to risk, no leverage multiplier
   const entry0 = p.entry[0];
   const risk$  = acctEq * (riskPc/100);
   const riskD  = Math.abs(entry0 - p.stop);
-  const qty    = riskD ? (risk$ / riskD) : 0;
-  const posUsd = qty * entry0; // notional in USD
+  const qty    = riskD ? (risk$ / riskD) : 0; // BTC size
+  const posUsd = qty * entry0;                // notional USD
 
   const ts=new Date().toLocaleString("en-GB",{timeZone:"Europe/Paris",hour12:false});
   const icon=p.dir==="LONG"?"🟢":"🔴";
@@ -346,7 +364,6 @@ Enter within zone; abort if unfilled in 90 min or opposite trigger forms.
 }
 
 /* ───────── 4 ▸ de-dupe & mute helpers -------------------------------------------- */
-// Build a per-play fingerprint to avoid duplicate spam while allowing different levels
 function playKey(p,d){
   // Prefer stable reference level per play; fallback to coarse price bucket
   const priceBucket = Math.round($(d.dataF.price)/50)*50;
@@ -371,7 +388,7 @@ function saveCache(path,obj){
 /* ───────── 5 ▸ main --------------------------------------------------------------- */
 (async()=>{
   try{
-    const dash = await safeJson(LIVE);
+    const dash = await safeJson(LIVE, { timeoutMs: fetchTimeout, retries: fetchRetries });
 
     const price = $(dash.dataF.price);
     const HH20  = $(dash.dataF.levels?.HH20);
@@ -447,6 +464,12 @@ function saveCache(path,obj){
   }catch(err){
     console.error("❌",err);
     try{ await tg(esc(`Bot error: ${err.message}`)); }catch{}
-    process.exit(1);
+    const isAbort = err?.name === "AbortError" || err?.type === "aborted";
+    if (isAbort || softFail) {
+      // transient fetch timeout — don’t fail the workflow
+      process.exit(0);
+    } else {
+      process.exit(1);
+    }
   }
 })();
