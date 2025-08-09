@@ -3,11 +3,11 @@
     v2 ▸ adds unified Quality-score (1-10) with per-play weights & tiered bonuses.
            Alerts STILL print when a setup is below its gate – they’re just labelled.
 
-    v2.3 ▸ regime-aware gating (trend vs range) + robustness
-      - Detect HTF regime (4h/1d) and LTF regime (15m) once per tick
-      - Adjust per-play gates or deny plays that don’t fit the regime
-      - Keeps Telegram output identical in format (same lines/labels/emojis)
-      - Retains earlier fixes: sizing, TTL, A-tier bypass, robust fetch, etc.
+    v2.4 ▸ regime-aware + robust fetch + CI-friendly diagnostics
+      - Adds a SIGNAL CHECK REPORT printed to console on every run:
+        • shows each of the 9 signals as DETECTED or SKIPPED with concise reasons
+        • after regime gating, prints a POST-GATE SUMMARY per signal (sent/ gated)
+      - Telegram message format is unchanged.
 */
 
 import fs   from "fs";
@@ -247,36 +247,28 @@ function regimeAdjustGate(p, d, R){
 
   switch(p.id){
     /* Trend continuation plays */
-    case 1: // HH20 Break-Retest (LONG)
-    case 2: // AVWAP Reclaim (LONG)
-    case 6: // EMA Pull-back (LONG)
-    case 9: // Session Kick (LONG/SHORT)
-      if(R.htf==="range") gateAdj += 1;                  // tougher in ranges
-      if(R.adxStrong && oppToHTF) gateAdj += 2;          // much tougher against strong trend
+    case 1: case 2: case 6: case 9:
+      if(R.htf==="range") gateAdj += 1;
+      if(R.adxStrong && oppToHTF) gateAdj += 2;
       break;
 
     /* Mean-reversion plays */
-    case 4: // Liq-Sweep
-    case 8: // VWAP Fade
-      if(R.adxStrong && R.htf!=="range" && !d.dataF.neckBreak) gateAdj += 2; // demand more on strong trend unless neckBreak
-      if(R.ltfExpansion && !R.ltfCompression) gateAdj += 1;  // expansion regime: fades are trickier
+    case 4: case 8:
+      if(R.adxStrong && R.htf!=="range" && !d.dataF.neckBreak) gateAdj += 2;
+      if(R.ltfExpansion && !R.ltfCompression) gateAdj += 1;
       break;
 
     /* Breakout from balance (needs compression first) */
-    case 5: // High-OI Box (BREAK)
-    case 7: // Opening-Range (BREAK)
+    case 5: case 7:
       if(!R.ltfCompression){
-        deny = true; // not a balance → skip (keeps TG quiet)
-        dbg(`Regime deny: Play #${p.id} requires LTF compression`);
+        deny = true;
       }
       break;
 
     /* Contrarian crowd play */
-    case 3: // Funding Fade
+    case 3:
       if(R.adxStrong){
-        // Extra tough if fading a strong HTF trend
-        if(oppToHTF) gateAdj += 2;
-        else gateAdj += 1;
+        if(oppToHTF) gateAdj += 2; else gateAdj += 1;
       }
       break;
 
@@ -286,110 +278,214 @@ function regimeAdjustGate(p, d, R){
   return { gateAdj, deny };
 }
 
-/* ───────── 2 ▸ play generator ------------------------------------------------------ */
-function detectPlays(d){
-  const plays=[], price=$(d.dataF.price);
+/* ───────── 2 ▸ signal evaluation with diagnostics --------------------------------- */
+function evaluateSignals(d){
+  const checks=[];            // per-signal diagnostics
+  const plays=[];             // detected plays (for scoring/gating/Telegram)
+  const price=$(d.dataF.price);
   const distOK =(lvl,p=5)=>lvl&&Math.abs(lvl-price)/price*100<=p;
 
-  /* ------------------------------------------------ Play #1 HH20 Break-Retest */
-  const HH20=$(d.dataF.levels?.HH20);
-  if(distOK(HH20)&&price>HH20*1.001){
-    plays.push({id:1,dir:"LONG",name:"Break-Retest",
-      entry:[HH20*1.0005,HH20*1.0015],stop:HH20*0.992,tp1:HH20*1.015,lev:[5,15]});
-  }
+  // helper to push a check result
+  const addCheck=(id,name,passed,reasons=[])=>{
+    checks.push({id,name,result:passed?"DETECTED":"SKIPPED",reasons});
+  };
 
-  /* ------------------------------------------------ Play #2 AVWAP Reclaim */
-  const avwap=$(d.dataF.avwapCycle);
-  const avAge=(Date.now()-$(d.dataF.avwapAnchorTs||0))/864e5;
-  if(distOK(avwap)&&avAge<=30&&price>avwap*1.001){
-    const atr4=$(d.dataA["4h"].atrPct)/100;
-    plays.push({id:2,dir:"LONG",name:"AVWAP Reclaim",
-      entry:[avwap,avwap*1.001],stop:avwap*(1-atr4),tp1:price*1.015,lev:[3,8]});
-  }
-
-  /* ------------------------------------------------ Play #3 Funding Fade */
-  const fundingZ=parseFloat(d.dataB.fundingZ);
-  if(Math.abs(fundingZ)>=2){
-    const dir=fundingZ>0?"SHORT":"LONG",s=dir==="LONG"?1:-1;
-    plays.push({id:3,dir,name:"Funding Fade",
-      entry:[price],stop:price*(1-s*0.006),tp1:price*(1+s*0.0075),lev:[5,15]});
-  }
-
-  /* ------------------------------------------------ Play #4 Liq-Sweep */
-  const liq=d.dataB.liquidations||{};
-  const bigLiq=Math.max($(liq.long1h),$(liq.short1h));
-  const atr15=$(d.dataA["15m"].atrPct);
-  if(bigLiq>=25e6&&atr15<=1.5){
-    const dir=$(liq.short1h)>$(liq.long1h)?"LONG":"SHORT",s=dir==="LONG"?1:-1;
-    // widened tiny front-run to ~0.07% for reliability
-    plays.push({id:4,dir,name:"Liq-Sweep",
-      entry:[price-price*0.0007*s],stop:price-price*0.004*s,tp1:price+price*0.004*s,lev:[10,50]});
-  }
-
-  /* ------------------------------------------------ Play #5 High-OI Squeeze */
-  const oiPct=$(d.dataB.oi30dPct), oiΔ=$(d.dataB.oiDelta24h);
-  if(oiPct>=95&&Math.abs(oiΔ)<=2){
-    plays.push({id:5,dir:"BREAK",name:"High-OI Box",
-      entry:[price],stop:price*0.982,tp1:price*1.04,lev:[5,15]});
-  }
-
-  /* ------------------------------------------------ Play #6 EMA Pull-back */
-  const adx14=$(d.dataA["4h"].adx14);
-  if(adx14>20&&d.dataA["1d"].ema50>d.dataA["1d"].ema200&&price<d.dataA["4h"].ema50){
-    const ema=d.dataA["4h"].ema50;
-    const entry = ema*0.999;
-    const stop  = ema*0.99;     // ~ -1%
-    const tp1   = entry*1.02;   // +2% from entry
-    plays.push({id:6,dir:"LONG",name:"EMA Pull-back",
-      entry:[entry],stop,tp1,lev:[3,10]});
-  }
-
-  /* ------------------------------------------------ Play #7 Opening-Range */
-  const now=new Date();
-  if(now.getUTCMinutes()===20&&atr15<0.5&&d.dataD.sessionRelVol?.asia>1.2){
-    // Enforce ≥1R: SL = atr%, TP1 >= 1.5R (rr=1.5)
-    const slFrac = atr15/100;
-    const rr = 1.5;
-    const stop = price*(1 - slFrac);        // -ATR%
-    const tp1  = price*(1 + slFrac*rr);     // +rr*ATR%
-    plays.push({id:7,dir:"BREAK",name:"Opening-Range",
-      entry:[price],stop,tp1,lev:[10,25]});
-  }
-
-  /* ------------------------------------------------ Play #8 VWAP Fade */
-  const vwap=$(d.dataF.levels?.vwap),
-        up=$(d.dataF.levels?.vwapUpper),
-        lo=$(d.dataF.levels?.vwapLower),
-        bandW=vwapBandWidthPct(d);
-  if(bandW&&bandW<3){
-    if(up&&price>up&&distOK(up,3)){
-      plays.push({id:8,dir:"SHORT",name:"VWAP Fade",
-        entry:[price],stop:price*1.007,tp1:vwap,lev:[5,20]});
-    }
-    if(lo&&price<lo&&distOK(lo,3)){
-      plays.push({id:8,dir:"LONG",name:"VWAP Fade",
-        entry:[price],stop:price*0.993,tp1:vwap,lev:[5,20]});
+  /* #1 HH20 Break-Retest */
+  {
+    const name="Break-Retest";
+    const HH20=$(d.dataF.levels?.HH20);
+    const c1 = !!distOK(HH20);
+    const c2 = HH20 ? price>HH20*1.001 : false;
+    if(c1 && c2){
+      plays.push({id:1,dir:"LONG",name,
+        entry:[HH20*1.0005,HH20*1.0015],stop:HH20*0.992,tp1:HH20*1.015,lev:[5,15]});
+      addCheck(1,name,true);
+    }else{
+      const reasons=[];
+      if(!HH20) reasons.push("HH20 missing");
+      if(!c1) reasons.push("price not within 5% of HH20");
+      if(HH20 && !c2) reasons.push("price not > HH20 by 0.1%");
+      addCheck(1,name,false,reasons);
     }
   }
 
-  /* ------------------------------------------------ Play #9 Session Kick */
-  const roc1h=$(d.dataC["1h"].roc10), ses=d.dataD.sessionRelVol||{};
-  const hr=now.getUTCHours();
-  if((hr===8||hr===14)&&Math.abs(roc1h)>=0.4&&(ses.asia>1.5||ses.eu>1.5)){
-    const dir=roc1h>0?"LONG":"SHORT",s=dir==="LONG"?1:-1;
-    plays.push({id:9,dir,name:"Session Kick",
-      entry:[price],stop:price*(1-s*0.004),tp1:price*(1+s*0.01),lev:[5,15]});
+  /* #2 AVWAP Reclaim */
+  {
+    const name="AVWAP Reclaim";
+    const avwap=$(d.dataF.avwapCycle);
+    const ageDays=(Date.now()-$(d.dataF.avwapAnchorTs||0))/864e5;
+    const c1 = !!distOK(avwap);
+    const c2 = ageDays<=30;
+    const c3 = avwap ? price>avwap*1.001 : false;
+    if(c1 && c2 && c3){
+      const atr4=$(d.dataA["4h"].atrPct)/100;
+      plays.push({id:2,dir:"LONG",name,
+        entry:[avwap,avwap*1.001],stop:avwap*(1-atr4),tp1:price*1.015,lev:[3,8]});
+      addCheck(2,name,true);
+    }else{
+      const reasons=[];
+      if(!avwap) reasons.push("AVWAP missing");
+      if(!c1) reasons.push("price not near AVWAP (≤5%)");
+      if(!c2) reasons.push(`anchor too old (${ageDays?.toFixed?.(1)}d)`);
+      if(avwap && !c3) reasons.push("no reclaim (>0.1%)");
+      addCheck(2,name,false,reasons);
+    }
   }
 
-  /* ---- score (quality) -------------------------------------------------- */
-  const final=[];
-  for(const p of plays){
-    const q = computeQualityScore(d,p);
-    p.quality = q;
-    p.belowGate = false; // set later with regime-adjusted gate
-    final.push(p);
+  /* #3 Funding Fade */
+  {
+    const name="Funding Fade";
+    const fz = Math.abs(parseFloat(d.dataB.fundingZ));
+    const c1 = fz>=2;
+    if(c1){
+      const dir=(parseFloat(d.dataB.fundingZ)>0)?"SHORT":"LONG",s=dir==="LONG"?1:-1;
+      plays.push({id:3,dir,name,
+        entry:[price],stop:price*(1-s*0.006),tp1:price*(1+s*0.0075),lev:[5,15]});
+      addCheck(3,name,true);
+    }else{
+      addCheck(3,name,false,[`|fundingZ| ${fz?.toFixed?.(2)} < 2`]);
+    }
   }
-  return final;
+
+  /* #4 Liq-Sweep */
+  {
+    const name="Liq-Sweep";
+    const liq=d.dataB.liquidations||{};
+    const bigLiq=Math.max($(liq.long1h),$(liq.short1h));
+    const atr15=$(d.dataA["15m"].atrPct);
+    const c1 = bigLiq>=25e6;
+    const c2 = atr15<=1.5;
+    if(c1 && c2){
+      const dir=$(liq.short1h)>$(liq.long1h)?"LONG":"SHORT",s=dir==="LONG"?1:-1;
+      plays.push({id:4,dir,name,
+        entry:[price-price*0.0007*s],stop:price-price*0.004*s,tp1:price+price*0.004*s,lev:[10,50]});
+      addCheck(4,name,true);
+    }else{
+      const r=[];
+      if(!c1) r.push(`liquidations ${fmt(bigLiq/1e6,0)}M < 25M`);
+      if(!c2) r.push(`ATR15 ${atr15?.toFixed?.(2)}% > 1.5%`);
+      addCheck(4,name,false,r);
+    }
+  }
+
+  /* #5 High-OI Box */
+  {
+    const name="High-OI Box";
+    const oiPct=$(d.dataB.oi30dPct), oiΔ=$(d.dataB.oiDelta24h);
+    const c1 = oiPct>=95;
+    const c2 = Math.abs(oiΔ)<=2;
+    if(c1 && c2){
+      plays.push({id:5,dir:"BREAK",name,
+        entry:[price],stop:price*0.982,tp1:price*1.04,lev:[5,15]});
+      addCheck(5,name,true);
+    }else{
+      const r=[];
+      if(!c1) r.push(`OI30d ${fmt(oiPct,0)}% < 95%`);
+      if(!c2) r.push(`|oiΔ24h| ${fmt(Math.abs(oiΔ),2)}% > 2%`);
+      addCheck(5,name,false,r);
+    }
+  }
+
+  /* #6 EMA Pull-back */
+  {
+    const name="EMA Pull-back";
+    const adx14=$(d.dataA["4h"].adx14);
+    const ema50d=$(d.dataA["1d"].ema50);
+    const ema200d=$(d.dataA["1d"].ema200);
+    const ema50_4h=$(d.dataA["4h"].ema50);
+    const c1 = adx14>20;
+    const c2 = ema50d>ema200d;
+    const c3 = price<ema50_4h;
+    if(c1 && c2 && c3){
+      const entry = ema50_4h*0.999;
+      const stop  = ema50_4h*0.99;
+      const tp1   = entry*1.02;
+      plays.push({id:6,dir:"LONG",name,entry:[entry],stop,tp1,lev:[3,10]});
+      addCheck(6,name,true);
+    }else{
+      const r=[];
+      if(!c1) r.push(`ADX4h ${fmt(adx14,0)} ≤ 20`);
+      if(!c2) r.push("EMA50d ≤ EMA200d");
+      if(!c3) r.push("price ≥ EMA50 4h");
+      addCheck(6,name,false,r);
+    }
+  }
+
+  /* #7 Opening-Range */
+  {
+    const name="Opening-Range";
+    const now=new Date();
+    const atr15=$(d.dataA["15m"].atrPct);
+    const asia=d.dataD.sessionRelVol?.asia;
+    const c1 = now.getUTCMinutes()===20;
+    const c2 = atr15<0.5;
+    const c3 = asia>1.2;
+    if(c1 && c2 && c3){
+      const slFrac = atr15/100;
+      const rr = 1.5;
+      const stop = price*(1 - slFrac);
+      const tp1  = price*(1 + slFrac*rr);
+      plays.push({id:7,dir:"BREAK",name,entry:[price],stop,tp1,lev:[10,25]});
+      addCheck(7,name,true);
+    }else{
+      const r=[];
+      if(!c1) r.push("minute != 20");
+      if(!c2) r.push(`ATR15 ${atr15?.toFixed?.(2)}% ≥ 0.5%`);
+      if(!c3) r.push(`Asia rel vol ${asia} ≤ 1.2`);
+      addCheck(7,name,false,r);
+    }
+  }
+
+  /* #8 VWAP Fade */
+  {
+    const name="VWAP Fade";
+    const vwap=$(d.dataF.levels?.vwap),
+          up=$(d.dataF.levels?.vwapUpper),
+          lo=$(d.dataF.levels?.vwapLower),
+          bandW=vwapBandWidthPct(d);
+    const bandOK = bandW && bandW<3;
+    let triggered=false; const r=[];
+    if(!bandOK) r.push(`bandW ${bandW?.toFixed?.(2)}% ≥ 3% or missing`);
+    if(bandOK && up && price>up && distOK(up,3)){
+      plays.push({id:8,dir:"SHORT",name,entry:[price],stop:price*1.007,tp1:vwap,lev:[5,20]});
+      triggered=true;
+    }
+    if(bandOK && lo && price<lo && distOK(lo,3)){
+      plays.push({id:8,dir:"LONG",name,entry:[price],stop:price*0.993,tp1:vwap,lev:[5,20]});
+      triggered=true;
+    }
+    if(triggered) addCheck(8,name,true);
+    else{
+      if(bandOK){
+        if(!(up && price>up && distOK(up,3))) r.push("no upper fade condition");
+        if(!(lo && price<lo && distOK(lo,3))) r.push("no lower fade condition");
+      }
+      addCheck(8,name,false,r);
+    }
+  }
+
+  /* #9 Session Kick */
+  {
+    const name="Session Kick";
+    const roc1h=$(d.dataC["1h"].roc10); const ses=d.dataD.sessionRelVol||{};
+    const now=new Date(); const hr=now.getUTCHours();
+    const c1 = (hr===8||hr===14);
+    const c2 = Math.abs(roc1h)>=0.4;
+    const c3 = (ses.asia>1.5||ses.eu>1.5);
+    if(c1 && c2 && c3){
+      const dir=roc1h>0?"LONG":"SHORT",s=dir==="LONG"?1:-1;
+      plays.push({id:9,dir,name,entry:[price],stop:price*(1-s*0.004),tp1:price*(1+s*0.01),lev:[5,15]});
+      addCheck(9,name,true);
+    }else{
+      const r=[];
+      if(!c1) r.push("hour not 8 or 14 UTC");
+      if(!c2) r.push(`|ROC1h| ${Math.abs(roc1h)?.toFixed?.(2)}% < 0.4%`);
+      if(!c3) r.push(`session vol low (ASIA ${ses.asia}, EU ${ses.eu})`);
+      addCheck(9,name,false,r);
+    }
+  }
+
+  return { plays, checks };
 }
 
 /* quick one-liner (console only) */
@@ -476,30 +572,73 @@ function saveCache(path,obj){
     // Compute regime once
     const REGIME = computeRegime(dash);
 
-    const plays = detectPlays(dash);
+    // Evaluate signals with diagnostics
+    const { plays, checks } = evaluateSignals(dash);
 
     // Apply regime-aware gate adjustments / denials BEFORE audit & sending
     for(const p of plays){
       const { gateAdj, deny } = regimeAdjustGate(p, dash, REGIME);
       const baseGate = MIN_GATE[p.id] || 5;
       const gate = Math.max(1, baseGate + gateAdj);
+      p.quality = p.quality ?? computeQualityScore(dash,p);
       p.belowGate = deny ? true : (p.quality < gate);
-      if(deny) dbg(`Play #${p.id} denied by regime (gate ${baseGate}➜X)`); else if(p.quality < gate) dbg(`Play #${p.id} gated by regime: score ${p.quality} < gate ${gate} (base ${baseGate} + ${gateAdj})`);
+      // Attach gate info so we can summarize later
+      p._gateInfo = { baseGate, gateAdj, finalGate: gate, deny };
     }
 
-    /* audit (reflects regime-adjusted gates) */
+    /* ===== SIGNAL CHECK REPORT (always printed) ===== */
+    console.log("=== SIGNAL CHECK REPORT ===");
+    // Regime context snapshot
+    const bandW = vwapBandWidthPct(dash);
+    console.log(`Regime: HTF=${REGIME.htf}, ADX4hStrong=${REGIME.adxStrong}, LTF Compression=${REGIME.ltfCompression}, LTF Expansion=${REGIME.ltfExpansion}, bandW=${bandW!=null?bandW.toFixed(2)+'%':'n/a'}, ATR15=${dash.dataA?.["15m"]?.atrPct!=null?dash.dataA["15m"].atrPct.toFixed(2)+'%':'n/a'}`);
+
+    // Map by id for later post-gate summary
+    const byId = new Map();
+    for (const c of checks){
+      byId.set(c.id, { name:c.name, detected: c.result==="DETECTED", reasons: c.reasons });
+      const mark = c.result==="DETECTED" ? "✓" : "✗";
+      const why  = c.result==="DETECTED" ? "ok" : (c.reasons.length? c.reasons.join("; ") : "conditions not met");
+      console.log(`#${c.id} ${c.name}: ${mark} ${c.result}${c.result==="DETECTED"?"":` — ${why}`}`);
+    }
+
+    /* audit (per-play lines & summary with gates) */
     const idList=plays.map(p=>`${p.id}(${p.quality}${p.belowGate?"⤓":""})`).join(",")||"none";
     console.log(`ALERT SUMMARY | price=${fmt$(price)}  ${HH20?`HH20Δ=${pct(price,HH20).toFixed(2)}%  `:""}${avwap?`AVWAPΔ=${pct(price,avwap).toFixed(2)}%  `:""}fundingZ=${fundingZ}  bigLiq=$${fmt(bigLiq/1e6,0)}M  plays=[${idList}]`);
     plays.forEach(p=>console.log(playLine(p)));
-    if(isDbg){
-      console.log("===== TRACE =====");
-      console.log(LOG.join("\n"));
-      console.log("=================");
+
+    // Post-gate summary per signal id
+    console.log("=== POST-GATE SUMMARY ===");
+    for (const [id, meta] of byId.entries()){
+      const detectedPlays = plays.filter(p=>p.id===id);
+      if (!meta.detected){
+        console.log(`#${id} ${meta.name}: SKIPPED pre-gate (no signal)`);
+        continue;
+      }
+      if (!detectedPlays.length){
+        console.log(`#${id} ${meta.name}: DETECTED, but no instances found (unexpected)`);
+        continue;
+      }
+      const sentable = detectedPlays.filter(p=>!p.belowGate);
+      if (sentable.length){
+        const quals = sentable.map(p=>p.quality).join(",");
+        console.log(`#${id} ${meta.name}: READY (passed gate) — quality=${quals}`);
+      }else{
+        const reasons = detectedPlays.map(p=>{
+          const gi=p._gateInfo||{}; return `q=${p.quality} < gate ${gi.finalGate} (base ${gi.baseGate}${gi.gateAdj?` +${gi.gateAdj}`:""})${gi.deny?" denied by regime":""}`;
+        }).join(" | ");
+        console.log(`#${id} ${meta.name}: GATED — ${reasons}`);
+      }
+    }
+    console.log("=== END CHECK REPORT ===");
+
+    if(!plays.length){
+      console.log("No plays detected — run finished OK.");
+      return;
     }
 
-    // Nothing detected or everything gated/denied
+    /* quality gate filter for Telegram */
     const sendable = plays.filter(p=>!p.belowGate);
-    if(!sendable.length){
+    if(!sendable.length) {
       console.log("No plays passed (after regime adjust) – nothing to send.");
       return;
     }
@@ -546,14 +685,14 @@ function saveCache(path,obj){
       saveCache(cachePath,cache);
     }
 
-    console.log(`✅ Sent ${fresh.length} alert(s)`);
+    console.log(`✅ HEALTHCHECK: Sent ${fresh.length} alert(s) — run completed successfully`);
 
   }catch(err){
     console.error("❌",err);
     try{ await tg(esc(`Bot error: ${err.message}`)); }catch{}
     const isAbort = err?.name === "AbortError" || err?.type === "aborted";
     if (isAbort || softFail) {
-      // transient fetch timeout — don’t fail the workflow
+      console.log("⚠️  HEALTHCHECK: fetch aborted/soft-failed — diagnostics not available this run");
       process.exit(0);
     } else {
       process.exit(1);
